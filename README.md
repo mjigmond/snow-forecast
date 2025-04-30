@@ -2,7 +2,7 @@
 
 Typical weather forecasts only cover well populated places but, if you're like me, and enjoy a cross country ski experience in remote areas, it helps to have a targeted forecast. Sure, you can always buy an app but it's less satisfying and at the end of the day, they all use a blend of existing models so you can always make your own blender recipe.
 
-## The Basics
+#### The Basics
 1. FastAPI based app that pulls the most recent model data (HRRR, GFS, AIFS) and generates forecast data for your area of interest.
 2. Uses [Herbie](https://herbie.readthedocs.io/en/stable/) to subset variables of interest.
 3. Can send email-to-text to major networks cell phone numbers (AT&T, T-Mobile, Verizon), but note that AT&T will discontinue the service starting June 17, 2025. You will need to setup a `.env` file with email credentials, such as:
