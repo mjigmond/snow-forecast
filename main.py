@@ -2,12 +2,10 @@ import math
 import ssl
 import smtplib
 from email.message import EmailMessage
-from typing import Literal, Self
-from herbie import Herbie, HerbieLatest
+from herbie import Herbie
 import uvicorn
 from fastapi import FastAPI
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field, model_validator
 import geopandas as gpd
 import shapely
 import os
@@ -15,91 +13,15 @@ import rioxarray as rxr
 from rasterio.enums import Resampling
 from rasterio.crs import CRS
 from dotenv import load_dotenv
+import numpy as np
+
+from data_models import *
 
 
 load_dotenv()
 
 
-INCHES = {  # Conversion factor from model units to inches
-    "hrrr": 3.28084 * 12,
-    "gfs": 10 / 25.4,
-    "aifs": 10 / 25.4,
-}
-VALID_MODELS = ["hrrr", "gfs", "aifs"]
-PRODUCT = {
-    "hrrr": "sfc",
-    "gfs": "pgrb2.0p25",
-    "aifs": "oper",
-}
-VARIABLE = {
-    "hrrr": "ASNOW",
-    "gfs": "WEASD",
-    "aifs": "sf",
-}
-RESOLUTION = {
-    "hrrr": 300,
-    "gfs": .01,
-    "aifs": .01,
-}
-PROVIDER_DOMAINS = {
-    'verizon': 'mypixmessages.com',
-    'at&t': 'mms.att.net',
-    't-mobile': 'tmomail.net'
-}
-
-
 app = FastAPI()
-
-class EmailSMTP(BaseModel):
-    server: str = "smtp.gmail.com"
-    user: str
-    password: str
-
-
-class Recipient(BaseModel):
-    number: int = Field(gt=999999999, le=9999999999, description="Recipient's phone number")
-    network: Literal["verizon", "at&t", "t-mobile"]
-
-
-class ForecastFxx(BaseModel):
-    fxx: int
-    hours: int
-
-
-class ModelStats(BaseModel):
-    model: str
-    min: float | None = None
-    max: float | None = None
-    mean: float | None = None
-    nan_reason: str | None = None
-
-
-class ForecastResponse(BaseModel):
-    name: str
-    attime: str
-    forecast: list[ModelStats]
-
-
-class ForecastRequest(BaseModel):
-    name: str
-    attime: str
-    models: list[str]
-    lat: float | None = None
-    lon: float | None = None
-    geometry: str | None = None
-    recipients: list[Recipient] | None = None
-
-    @model_validator(mode="after")
-    def check_input(self) -> Self:
-        if self.lat and self.lon and self.geometry:
-            raise ValueError("Either lat/lon or geometry must be provided, not both.")
-        if (self.lat and not self.lon) or (self.lon and not self.lat):
-            raise ValueError("Both lat and lon must be provided.")
-        if not self.geometry and not self.lat and not self.lon:
-            raise ValueError("One of lat/lon or geometry must be provided.")
-        if set(self.models).intersection(set(VALID_MODELS)) != set(self.models):
-            raise ValueError(f"Models must be from {VALID_MODELS}.")
-        return self
 
 
 @app.post("/forecast")
@@ -125,7 +47,7 @@ async def forecast(request: ForecastRequest) -> ForecastResponse:
         await _email_forecast(
             account=EmailSMTP(user=os.environ.get('EMAIL_USER'), password=os.environ.get('EMAIL_PASS')),
             subject=f"Forecast for {request.name} @ {request.attime}",
-            forecast=response,
+            fcast=response,
             recipients=recipients
         )
     return response
@@ -139,25 +61,25 @@ async def _get_fxx(attime: datetime) -> ForecastFxx:
     if attime < now:
         raise ValueError("attime must be in the future")
     hours = (attime - now).total_seconds() / 3600
-    # if hours > 48:
-    #     raise ValueError("attime must be within 48 hours")
     if hours <= 18:
         fxx = 18
     else:
         fxx = 48
-    return ForecastFxx(fxx=fxx, hours=int(math.floor(hours)))
+    return ForecastFxx(fxx=fxx, hours=int(math.ceil(hours)))
 
 
-async def _get_latest_herbie(model: str, fxx: int) -> HerbieLatest:
+async def _get_latest_herbie(model: str, valid_date: datetime) -> Herbie | None:
     """
     Get the latest Herbie object for the specified model.
     """
-    try:
-        HL = HerbieLatest(model=model, fxx=fxx, product=PRODUCT[model], periods=10)
-    except TimeoutError as e:
-        print(f"TimeoutError: {e}")
-        raise
-    return HL
+    for fxx in range(FXX[model] + 1):
+        try:
+            HL = Herbie(model=model, valid_date=valid_date, fxx=fxx, product=PRODUCT[model])
+            if HL.grib:
+                return HL
+        except Exception as e:
+            print(f"No model data yet")
+    return None
 
 
 async def _get_geometry(wkt: str, crs: CRS):
@@ -181,17 +103,13 @@ async def _process_model(
     """
     Process the model data and return statistics.
     """
-
-    ffxx = await _get_fxx(valid_date)
     try:
-        HL = await _get_latest_herbie(model, ffxx.fxx)
-
-        # compute new fxx based on latest available data
-        fxx = ffxx.fxx - (HL.valid_date.tz_localize(timezone.utc) - valid_date).total_seconds() / 3600
-        H = Herbie(date=HL.date, model=model, fxx=int(fxx), product=PRODUCT[model])
+        H = await _get_latest_herbie(model, valid_date.replace(tzinfo=None))
         inventory = H.inventory()
-        if model == "aifs":
-            asnow_search = inventory[inventory.param == VARIABLE[model]].search_this.values[0]
+        if model in ["aifs", "ifs"]:
+            asnow_search = f":(2t|{VARIABLE[model]}):sfc"
+        elif model == "gfs":
+            asnow_search = f":(TMP|{VARIABLE[model]}):surface"
         else:
             asnow_search = inventory[inventory.variable == VARIABLE[model]].search_this.values[0]
         grib = H.download(asnow_search, verbose=True)
@@ -205,20 +123,29 @@ async def _process_model(
             result = ds.rio.clip(gdf.geometry.values, drop=True)
         else:
             result = ds.sel(x=gdf.geometry.x.values, y=gdf.geometry.y.values, method="nearest")
-        result = result.where(result != result.rio.nodata, drop=True) * INCHES[model]
-        HL, H, ds, grib = None, None, None, None
-        return ModelStats(model=model, min=result.min().item(), max=result.max().item(), mean=result.mean().item())
+        result = result.where(result != result.rio.nodata, drop=True)
+        if model == "ifs":
+            tF = 32 + result[1].data * C2F
+            result = IPF(tF) * result[0].data * INCHES[model]
+        elif model != "hrrr":
+            tF = 32 + result[0].data * C2F
+            tF[tF > 35] = np.nan
+            result = IPF(tF) * result[1].data * INCHES[model]
+        else:
+            result = result.data * INCHES[model]
+        H, ds, grib = None, None, None
+        return ModelStats(model=model, min=np.nanmin(result), max=np.nanmax(result), mean=np.nanmean(result))
     except Exception as e:
         print(e)
         return ModelStats(model=model, nan_reason="No data")
 
 
-async def _forecast_to_message(forecast: ForecastResponse) -> str:
+async def _forecast_to_message(fcast: ForecastResponse) -> str:
     """
     Convert forecast data to a string message.
     """
     message = "Forecast Data:\n"
-    for model in forecast.forecast:
+    for model in fcast.forecast:
         message += f"Model: {model.model.upper()}\n"
         if model.min:
             message += f"Min: {model.min:.2f}\n"
@@ -229,9 +156,9 @@ async def _forecast_to_message(forecast: ForecastResponse) -> str:
     return message
 
 
-async def _email_forecast(account: EmailSMTP, subject: str, forecast: ForecastResponse, recipients: list[str]):
+async def _email_forecast(account: EmailSMTP, subject: str, fcast: ForecastResponse, recipients: list[str]):
     context = ssl.create_default_context()
-    forecast_message = await _forecast_to_message(forecast)
+    forecast_message = await _forecast_to_message(fcast)
     with smtplib.SMTP(account.server, 587) as smtp:
         smtp.ehlo()
         smtp.starttls(context=context)
