@@ -15,7 +15,6 @@ from rasterio.crs import CRS
 from dotenv import load_dotenv
 import numpy as np
 
-from constants import *
 from data_models import *
 
 
@@ -130,6 +129,7 @@ async def _process_model(
             result = IPF(tF) * result[0].data * INCHES[model]
         elif model != "hrrr":
             tF = 32 + result[0].data * C2F
+            tF[tF > 35] = np.nan
             result = IPF(tF) * result[1].data * INCHES[model]
         else:
             result = result.data * INCHES[model]
