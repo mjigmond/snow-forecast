@@ -146,11 +146,9 @@ async def _forecast_to_message(fcast: ForecastResponse) -> str:
     """
     message = "Forecast Data:\n"
     for model in fcast.forecast:
-        message += f"Model: {model.model.upper()}\n"
+        message += f"{model.model.upper()}: "
         if model.min:
-            message += f"Min: {model.min:.2f}\n"
-            message += f"Max: {model.max:.2f}\n"
-            message += f"Mean: {model.mean:.2f}\n\n"
+            message += f"{model.min:.2f}/{model.max:.2f}/{model.mean:.2f}"
         else:
             message += "No data\n\n"
     return message
