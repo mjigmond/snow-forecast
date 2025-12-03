@@ -5,7 +5,7 @@ from email.message import EmailMessage
 from herbie import Herbie
 import uvicorn
 from fastapi import FastAPI
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import geopandas as gpd
 import shapely
 import os
@@ -46,7 +46,7 @@ async def forecast(request: ForecastRequest) -> ForecastResponse:
         recipients = [f"{r.number}@{PROVIDER_DOMAINS[r.network]}" for r in request.recipients]
         await _email_forecast(
             account=EmailSMTP(user=os.environ.get('EMAIL_USER'), password=os.environ.get('EMAIL_PASS')),
-            subject=f"Forecast for {request.name} @ {request.attime}",
+            subject=f"{request.name} @ {datetime.fromisoformat(request.attime).strftime('%b %d, %H:%M')}",
             fcast=response,
             recipients=recipients
         )
@@ -72,6 +72,8 @@ async def _get_latest_herbie(model: str, valid_date: datetime) -> Herbie | None:
     """
     Get the latest Herbie object for the specified model.
     """
+    if model in ["ifs", "aifs"]:
+        valid_date = valid_date - timedelta(hours=1)
     for fxx in range(FXX[model] + 1):
         try:
             HL = Herbie(model=model, valid_date=valid_date, fxx=fxx, product=PRODUCT[model])
@@ -144,13 +146,13 @@ async def _forecast_to_message(fcast: ForecastResponse) -> str:
     """
     Convert forecast data to a string message.
     """
-    message = "Forecast Data:\n"
+    message = ""
     for model in fcast.forecast:
         message += f"{model.model.upper()}: "
         if model.min:
-            message += f"{model.min:.2f}/{model.max:.2f}/{model.mean:.2f}"
+            message += f"{model.min:.2f}/{model.max:.2f}/{model.mean:.2f}\n"
         else:
-            message += "No data\n\n"
+            message += "No data\n"
     return message
 
 
