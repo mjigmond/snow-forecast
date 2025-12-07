@@ -109,7 +109,7 @@ async def _process_model(
         H = await _get_latest_herbie(model, valid_date.replace(tzinfo=None))
         inventory = H.inventory()
         if model in ["aifs", "ifs"]:
-            asnow_search = f":(2t|{VARIABLE[model]}):sfc"
+            asnow_search = f":{VARIABLE[model]}:sfc"
         elif model == "gfs":
             asnow_search = f":(TMP|{VARIABLE[model]}):surface"
         else:
@@ -126,9 +126,8 @@ async def _process_model(
         else:
             result = ds.sel(x=gdf.geometry.x.values, y=gdf.geometry.y.values, method="nearest")
         result = result.where(result != result.rio.nodata, drop=True)
-        if model == "ifs":
-            tF = 32 + result[1].data * C2F
-            result = IPF(tF) * result[0].data * INCHES[model]
+        if model in ["ifs", "aifs"]:
+            result = result.data * INCHES[model]
         elif model != "hrrr":
             tF = 32 + result[0].data * C2F
             tF[tF > 35] = np.nan
